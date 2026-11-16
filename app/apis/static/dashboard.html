@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Box Health Agent</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+    padding: 24px;
+    background: #0b0f14;
+    color: #e6edf3;
+  }
+  h1 { font-size: 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+  h2 { font-size: 15px; margin: 0 0 12px; color: #9fb3c1; }
+  .badge {
+    display: inline-block;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .badge.ok { background: #1f6f3f; color: #d9fbe6; }
+  .badge.warn { background: #8a6d1b; color: #fff6d9; }
+  .badge.critical { background: #8a1f1f; color: #ffe3e3; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 20px;
+  }
+  .card {
+    background: #111820;
+    border: 1px solid #22303c;
+    border-radius: 10px;
+    padding: 16px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #22303c; }
+  th { color: #9fb3c1; font-weight: 500; }
+  canvas { max-height: 260px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Box Health Agent <span id="health-badge" class="badge">...</span></h1>
+
+<div class="grid">
+  <div class="card">
+    <h2>Last Hour</h2>
+    <canvas id="chart-1h"></canvas>
+  </div>
+  <div class="card">
+    <h2>Last 24 Hours</h2>
+    <canvas id="chart-24h"></canvas>
+  </div>
+  <div class="card">
+    <h2>Network Probes — Last Hour</h2>
+    <canvas id="chart-probes-1h"></canvas>
+  </div>
+  <div class="card">
+    <h2>Network Probes — Last 24 Hours</h2>
+    <canvas id="chart-probes-24h"></canvas>
+  </div>
+  <div class="card">
+    <h2>Open Alerts</h2>
+    <table id="open-alerts">
+      <thead><tr><th>Rule</th><th>Subject</th><th>Opened</th><th>Peak</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Closed Alerts</h2>
+    <table id="closed-alerts">
+      <thead><tr><th>Rule</th><th>Subject</th><th>Opened</th><th>Closed</th><th>Peak</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function fmtTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleTimeString() : "";
+}
+
+async function fetchMetric(name, sinceSeconds) {
+  const since = (Date.now() / 1000) - sinceSeconds;
+  const res = await fetch(`/metrics?name=${encodeURIComponent(name)}&since=${since}`);
+  return res.json();
+}
+
+function makeChart(canvasId) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  return new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        { label: "CPU %", data: [], borderColor: "#4fa3ff", backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
+        { label: "RAM %", data: [], borderColor: "#ff8a5c", backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
+      ],
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#9fb3c1", maxTicksLimit: 8 } },
+        y: { min: 0, max: 100, ticks: { color: "#9fb3c1" } },
+      },
+      plugins: { legend: { labels: { color: "#e6edf3" } } },
+    },
+  });
+}
+
+async function refreshChart(chart, sinceSeconds) {
+  const [cpu, ram] = await Promise.all([
+    fetchMetric("cpu.total", sinceSeconds),
+    fetchMetric("ram.percent", sinceSeconds),
+  ]);
+  chart.data.labels = cpu.map((row) => fmtTime(row.timestamp));
+  chart.data.datasets[0].data = cpu.map((row) => row.value);
+  chart.data.datasets[1].data = ram.map((row) => row.value);
+  chart.update();
+}
+
+function makeProbeChart(canvasId) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  return new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        { label: "DNS resolution (ms)", data: [], borderColor: "#4fa3ff", backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
+        { label: "TCP connect (ms)", data: [], borderColor: "#ff8a5c", backgroundColor: "transparent", tension: 0.2, pointRadius: 0 },
+        { label: "Gateway loss (%)", data: [], borderColor: "#7fe3a3", backgroundColor: "transparent", tension: 0.2, pointRadius: 0, yAxisID: "pct" },
+        { label: "Internet loss (%)", data: [], borderColor: "#e37fd8", backgroundColor: "transparent", tension: 0.2, pointRadius: 0, yAxisID: "pct" },
+      ],
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#9fb3c1", maxTicksLimit: 8 } },
+        y: { min: 0, ticks: { color: "#9fb3c1" }, title: { display: true, text: "ms", color: "#9fb3c1" } },
+        pct: { min: 0, max: 100, position: "right", ticks: { color: "#9fb3c1" }, grid: { drawOnChartArea: false }, title: { display: true, text: "% loss", color: "#9fb3c1" } },
+      },
+      plugins: { legend: { labels: { color: "#e6edf3" } } },
+    },
+  });
+}
+
+async function refreshProbeChart(chart, sinceSeconds) {
+  const [dns, tcp, gatewayLoss, internetLoss] = await Promise.all([
+    fetchMetric("probe.dns_resolution_ms", sinceSeconds),
+    fetchMetric("probe.tcp_connect_ms", sinceSeconds),
+    fetchMetric("probe.gateway_packet_loss_pct", sinceSeconds),
+    fetchMetric("probe.internet_packet_loss_pct", sinceSeconds),
+  ]);
+  chart.data.labels = dns.map((row) => fmtTime(row.timestamp));
+  chart.data.datasets[0].data = dns.map((row) => row.value);
+  chart.data.datasets[1].data = tcp.map((row) => row.value);
+  chart.data.datasets[2].data = gatewayLoss.map((row) => row.value);
+  chart.data.datasets[3].data = internetLoss.map((row) => row.value);
+  chart.update();
+}
+
+function renderAlertRows(tableId, alertsList, includeClosed) {
+  const tbody = document.querySelector(`#${tableId} tbody`);
+  tbody.innerHTML = "";
+  for (const alert of alertsList) {
+    const tr = document.createElement("tr");
+    const cells = includeClosed
+      ? [alert.rule, alert.subject, fmtTime(alert.opened_at), fmtTime(alert.closed_at), alert.peak_value]
+      : [alert.rule, alert.subject, fmtTime(alert.opened_at), alert.peak_value];
+    tr.innerHTML = cells.map((c) => `<td>${c ?? ""}</td>`).join("");
+    tbody.appendChild(tr);
+  }
+}
+
+async function refreshHealth() {
+  const res = await fetch("/health");
+  const data = await res.json();
+  const badge = document.getElementById("health-badge");
+  badge.textContent = data.status.toUpperCase();
+  badge.className = `badge ${data.status}`;
+}
+
+async function refreshAlerts() {
+  const [open, closed] = await Promise.all([
+    fetch("/alerts?open=true").then((r) => r.json()),
+    fetch("/alerts?open=false").then((r) => r.json()),
+  ]);
+  renderAlertRows("open-alerts", open, false);
+  renderAlertRows("closed-alerts", closed, true);
+}
+
+const charts = {
+  "1h": makeChart("chart-1h"),
+  "24h": makeChart("chart-24h"),
+};
+const probeCharts = {
+  "1h": makeProbeChart("chart-probes-1h"),
+  "24h": makeProbeChart("chart-probes-24h"),
+};
+
+async function refreshAll() {
+  await Promise.all([
+    refreshHealth(),
+    refreshAlerts(),
+    refreshChart(charts["1h"], 3600),
+    refreshChart(charts["24h"], 86400),
+    refreshProbeChart(probeCharts["1h"], 3600),
+    refreshProbeChart(probeCharts["24h"], 86400),
+  ]);
+}
+
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
+
+</body>
+</html>

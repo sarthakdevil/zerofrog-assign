@@ -1,0 +1,18 @@
+[project]
+name = "zerofrog-ass"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "dnspython>=2.9.2",
+    "fastapi>=0.163.1",
+    "httpx>=0.28.1",
+    "psutil>=7.2.2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
